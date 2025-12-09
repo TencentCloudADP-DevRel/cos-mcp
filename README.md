@@ -70,7 +70,7 @@
 - **说明**: 存储桶名称，用于存放数据，相当于您的个人存储空间。
 - **获取方式**: 
   1. 访问 [存储桶列表](https://console.cloud.tencent.com/cos/bucket)。
-  2. 复制存储桶名称。如果没有存储桶，可点击“创建存储桶”，一般选择默认配置即可快速完成创建。
+  2. 复制存储桶名称。如果没有存储桶，可点击"创建存储桶"，一般选择默认配置即可快速完成创建。
 
 ### 3. **Region**
 - **示例**: `ap-beijing`
@@ -86,18 +86,71 @@
   2. 创建数据集并等待索引建立完成后，复制数据集名称。
 
 ### 5. **connectType**
-- **说明**: 非必填参数，指定连接方式，可选值为 `stdio`（本地）或 `sse`（远程）。
+- **说明**: 非必填参数，指定连接方式，可选值为 `stdio`（本地）、`sse`（远程）或 `streamablehttp`（远程，推荐）。
 - **默认值**: `stdio`
 
 ### 6. **port**
-- **说明**: 非必填参数，当连接方式为 `sse` 时，可自由设置端口。
+- **说明**: 非必填参数，当连接方式为 `sse` 或 `streamablehttp` 时，可自由设置端口。
 - **默认值**: `3001`
+
+---
+
+## 配置方式
+
+COS MCP Server 支持两种配置方式：
+
+### 方式一：客户端配置（推荐）⭐
+
+通过 MCP 客户端的 `headers` 传递配置，**无需在服务端配置敏感信息**，更安全灵活。
+
+**适用场景**：
+- 多用户共享同一个 MCP 服务
+- 不同项目使用不同的 COS 配置
+- 不想在服务端暴露敏感凭证
+
+**配置示例（Cursor）**：
+
+```json
+{
+  "mcpServers": {
+    "cos-mcp": {
+      "url": "https://your-domain.com/mcp",
+      "transport": "streamablehttp",
+      "headers": {
+        "cos-secret-id": "你的SecretId",
+        "cos-secret-key": "你的SecretKey",
+        "cos-region": "ap-guangzhou",
+        "cos-bucket": "your-bucket-1234567890",
+        "cos-dataset-name": "your-dataset"
+      }
+    }
+  }
+}
+```
+
+**支持的 Headers**：
+- `cos-secret-id`: SecretId（必填）
+- `cos-secret-key`: SecretKey（必填）
+- `cos-region`: Region（必填）
+- `cos-bucket`: Bucket（必填）
+- `cos-dataset-name`: DatasetName（可选，仅数据智能检索时需要）
+
+### 方式二：服务端配置
+
+通过命令行参数或 `.env` 文件在服务端配置，适合个人使用或本地开发。
+
+**适用场景**：
+- 个人使用
+- 本地开发调试
+- 固定的 COS 配置
 
 ---
 
 ## 从 npx 启动
 
 在大模型内使用时（例如: cursor），需要在 `mcp.json` 中配置：
+
+### 使用服务端配置（命令行参数）
 
 ```json
 {
@@ -133,6 +186,25 @@
 }
 ```
 
+### 使用客户端配置（Headers，推荐）
+
+```json
+{
+  "mcpServers": {
+    "cos-mcp": {
+      "url": "https://your-domain.com/mcp",
+      "transport": "streamablehttp",
+      "headers": {
+        "cos-secret-id": "你的SecretId",
+        "cos-secret-key": "你的SecretKey",
+        "cos-region": "ap-guangzhou",
+        "cos-bucket": "your-bucket-1234567890"
+      }
+    }
+  }
+}
+```
+
 ---
 
 ## 使用 npm 安装
@@ -141,20 +213,27 @@
 # 安装
 npm install -g cos-mcp@latest
 
-# 运行开启 SSE 模式
-cos-mcp --Region=yourRegion --Bucket=yourBucket --SecretId=yourSecretId --SecretKey=yourSecretKey --DatasetName=yourDatasetname --port=3001 --connectType=sse
+# 方式一：使用服务端配置启动
+cos-mcp --Region=yourRegion --Bucket=yourBucket --SecretId=yourSecretId --SecretKey=yourSecretKey --DatasetName=yourDatasetname --port=3001 --connectType=streamablehttp
 
-# 或通过 JSON 配置
-cos-mcp --cos-config='{"Region":"yourRegion","Bucket":"BucketName-APPID","SecretId":"yourSecretId","SecretKey":"yourSecretKey","DatasetName":"datasetName"}' --port=3001 --connectType=sse
+# 方式二：使用客户端配置启动（服务端不配置敏感信息）
+cos-mcp --port=3001 --connectType=streamablehttp
 ```
 
-在大模型内使用 SSE 模式时（例如: cursor），需要在 `mcp.json` 中配置：
+在大模型内使用时（例如: cursor），需要在 `mcp.json` 中配置：
 
 ```json
 {
   "mcpServers": {
     "cos-mcp": {
-      "url": "http://localhost:3001/sse"
+      "url": "http://localhost:3001/mcp",
+      "transport": "streamablehttp",
+      "headers": {
+        "cos-secret-id": "你的SecretId",
+        "cos-secret-key": "你的SecretKey",
+        "cos-region": "ap-guangzhou",
+        "cos-bucket": "your-bucket-1234567890"
+      }
     }
   }
 }
@@ -179,9 +258,9 @@ npm install
 
 ### 步骤 3: 启动服务
 
-#### 3.1 配置本地环境变量
+#### 3.1 配置本地环境变量（可选）
 
-创建 `.env` 文件，并配置以下环境变量：
+如果想使用服务端配置，创建 `.env` 文件：
 
 ```env
 Region='yourRegion'
@@ -191,13 +270,21 @@ SecretKey='yourSecretKey'
 DatasetName="yourDatasetName"
 ```
 
-#### 3.2 本地 SSE 模式启动（方式一）
+如果使用客户端配置（Headers），则无需配置 `.env` 文件。
+
+#### 3.2 本地 StreamableHTTP 模式启动（推荐）
+
+```bash
+npm run start:streamablehttp
+```
+
+#### 3.3 本地 SSE 模式启动
 
 ```bash
 npm run start:sse
 ```
 
-#### 3.3 本地构建后使用 STDIO 模式（方式二）
+#### 3.4 本地构建后使用 STDIO 模式
 
 ```bash
 npm run build
@@ -209,13 +296,38 @@ npm run build
 
 ### 步骤 4: 在大模型内使用
 
+#### StreamableHTTP 模式配置（推荐）
+
+```json
+{
+  "mcpServers": {
+    "cos-mcp": {
+      "url": "http://localhost:3001/mcp",
+      "transport": "streamablehttp",
+      "headers": {
+        "cos-secret-id": "你的SecretId",
+        "cos-secret-key": "你的SecretKey",
+        "cos-region": "ap-guangzhou",
+        "cos-bucket": "your-bucket-1234567890"
+      }
+    }
+  }
+}
+```
+
 #### SSE 模式配置
 
 ```json
 {
   "mcpServers": {
     "cos-mcp": {
-      "url": "http://localhost:3001/sse"
+      "url": "http://localhost:3001/sse",
+      "headers": {
+        "cos-secret-id": "你的SecretId",
+        "cos-secret-key": "你的SecretKey",
+        "cos-region": "ap-guangzhou",
+        "cos-bucket": "your-bucket-1234567890"
+      }
     }
   }
 }
@@ -229,7 +341,11 @@ npm run build
     "cos-mcp": {
       "command": "node",
       "args": [
-        "${your work space}/dist/index.js"
+        "${your work space}/dist/index.js",
+        "--Region=yourRegion",
+        "--Bucket=yourBucket",
+        "--SecretId=yourSecretId",
+        "--SecretKey=yourSecretKey"
       ]
     }
   }
@@ -242,18 +358,20 @@ npm run build
 
 ## ⚠️ 注意事项
 
-1. 如果安装了旧版本的包，可以将上述内容内 `cos-mcp` 改为 `cos-mcp@latest` 安装最新版包。
-2. 如果全局安装后直接使用 `cos-mcp` 不行，可能是全局变量有问题，可以使用拆分变量或 `npx` 的方式启动：
+1. **推荐使用客户端配置（Headers）方式**：更安全，支持多用户、多项目场景。
+2. 如果安装了旧版本的包，可以将上述内容内 `cos-mcp` 改为 `cos-mcp@latest` 安装最新版包。
+3. 如果全局安装后直接使用 `cos-mcp` 不行，可能是全局变量有问题，可以使用拆分变量或 `npx` 的方式启动：
    ```bash
    npm install -g cos-mcp@latest
-   cos-mcp --cos-config=xxx --port=3001 --connectType=sse
+   cos-mcp --cos-config=xxx --port=3001 --connectType=streamablehttp
    ```
    上述命令效果等同于：
    ```bash
-   npx cos-mcp@latest --cos-config=xxx --port=3001 --connectType=sse
+   npx cos-mcp@latest --cos-config=xxx --port=3001 --connectType=streamablehttp
    ```
-3. 如果出现解析问题，可能是终端对双引号敏感，可以将配置参数改为以下格式再尝试：
+4. 如果出现解析问题，可能是终端对双引号敏感，可以将配置参数改为以下格式再尝试：
    ```bash
-   --cos-config='{\"Region\":\"yourRegion\",\"Bucket\":\"BucketName-APPID\",\"SecretId\":\"yourSecretId\",\"SecretKey\":\"yourSecretKey\",\"DatasetName\":\"datasetName\"}' --port=3001 --connectType=sse
+   --cos-config='{\"Region\":\"yourRegion\",\"Bucket\":\"BucketName-APPID\",\"SecretId\":\"yourSecretId\",\"SecretKey\":\"yourSecretKey\",\"DatasetName\":\"datasetName\"}' --port=3001 --connectType=streamablehttp
    ```
+5. **配置优先级**：客户端 Headers 配置 > 服务端命令行参数 > 服务端 .env 文件
 

@@ -232,3 +232,174 @@ DatasetName=
 - COS SDK 版本: `cos-nodejs-sdk-v5@2.14.7`
 - Node.js: v22.21.1
 - 默认服务端口: 3001
+
+---
+
+## 5. 配置方式优化 - 支持客户端动态配置 🆕✨
+
+### 问题背景
+
+原先的配置方式存在以下局限性：
+1. **服务端绑定配置**：必须在服务端通过 `.env` 文件或命令行参数配置 COS 凭证
+2. **多用户场景困难**：多个用户共享同一个 MCP 服务时，无法使用各自的 COS 配置
+3. **安全性问题**：敏感凭证需要在服务端配置和存储
+
+### 解决方案：支持 HTTP Headers 传递配置
+
+新增支持通过 **HTTP Headers** 动态传递 COS 配置，实现：
+- ✅ **客户端配置**：每个客户端可使用自己的 COS 凭证
+- ✅ **服务端无状态**：服务端无需存储任何敏感信息
+- ✅ **多用户支持**：同一服务支持多个用户、多个项目
+- ✅ **向后兼容**：保留原有的服务端配置方式
+
+### 支持的 HTTP Headers
+
+```
+cos-secret-id      → SecretId（必填）
+cos-secret-key     → SecretKey（必填）
+cos-region         → Region（必填）
+cos-bucket         → Bucket（必填）
+cos-dataset-name   → DatasetName（可选）
+```
+
+### 客户端配置示例
+
+**Cursor MCP 配置：**
+
+```json
+{
+  "mcpServers": {
+    "cos-mcp": {
+      "url": "https://your-domain.com/mcp",
+      "transport": "streamablehttp",
+      "headers": {
+        "cos-secret-id": "你的SecretId",
+        "cos-secret-key": "你的SecretKey",
+        "cos-region": "ap-guangzhou",
+        "cos-bucket": "your-bucket-1234567890",
+        "cos-dataset-name": "your-dataset"
+      }
+    }
+  }
+}
+```
+
+### 配置优先级
+
+```
+客户端 Headers 配置 > 服务端命令行参数 > 服务端 .env 文件
+```
+
+### 技术实现
+
+**1. 新增配置提取函数** (`src/server.ts`):
+
+```typescript
+export function extractCosConfigFromHeaders(headers: any): Partial<CosConfig> | null {
+  const config: Partial<CosConfig> = {};
+  
+  if (headers['cos-secret-id']) config.SecretId = headers['cos-secret-id'];
+  if (headers['cos-secret-key']) config.SecretKey = headers['cos-secret-key'];
+  if (headers['cos-region']) config.Region = headers['cos-region'];
+  if (headers['cos-bucket']) config.Bucket = headers['cos-bucket'];
+  if (headers['cos-dataset-name']) config.DatasetName = headers['cos-dataset-name'];
+  
+  return Object.keys(config).length > 0 ? config : null;
+}
+```
+
+**2. 动态创建 COS 实例**:
+
+```typescript
+export function createCosInstances(cosConfig: CosConfig) {
+  const cos = new COS({
+    SecretId: cosConfig.SecretId || '',
+    SecretKey: cosConfig.SecretKey || '',
+    UserAgent: USER_AGENT,
+  });
+
+  return {
+    cos,
+    COSInstance: new CosService(bucket, region, cos),
+    CIPicInstance: new CIPicService(bucket, region, cos),
+    // ... 其他服务实例
+  };
+}
+```
+
+**3. 工具函数支持请求上下文**:
+
+```typescript
+server.tool('putObject', '上传本地文件到存储桶', {...}, 
+  async ({ fileName, filePath, targetDir }, extra) => {
+    // 从请求上下文获取动态配置
+    const { COSInstance } = getCosInstances(extra?.requestContext);
+    const res = await COSInstance.uploadFile({ fileName, filePath, targetDir });
+    return { content: [...], isError: !res.isSuccess };
+  }
+);
+```
+
+**4. StreamableHTTP 和 SSE 模式注入配置**:
+
+```typescript
+// StreamableHTTP 模式
+const handleMcp = async (req: Request, res: Response) => {
+  const cosConfig = extractCosConfigFromHeaders(req.headers);
+  const transport = new StreamableHTTPServerTransport({...});
+  
+  if (cosConfig) {
+    (transport as any).requestContext = { cosConfig };
+  }
+  
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
+};
+```
+
+### 使用场景对比
+
+| 场景 | 推荐方式 | 说明 |
+|------|---------|------|
+| 个人本地开发 | 服务端配置 (.env) | 简单快捷 |
+| VPS 共享服务 | 客户端配置 (Headers) | 多用户安全 |
+| 企业多项目 | 客户端配置 (Headers) | 灵活切换 |
+| CI/CD 自动化 | 服务端配置 (命令行) | 脚本化部署 |
+
+### 优势总结
+
+1. **安全性提升**：敏感凭证仅在客户端配置，不经过服务端存储
+2. **灵活性增强**：同一服务支持多用户、多项目、多环境
+3. **部署简化**：VPS 上无需为每个用户配置 `.env` 文件
+4. **向后兼容**：保留原有配置方式，平滑升级
+5. **符合最佳实践**：配置与代码分离，遵循 12-Factor 原则
+
+### 部署建议
+
+**VPS 部署（推荐）：**
+
+```bash
+# 服务端启动（无需配置敏感信息）
+cos-mcp --port=3005 --connectType=streamablehttp
+
+# 客户端在 Cursor 配置中添加 headers
+```
+
+**本地开发：**
+
+```bash
+# 方式1：使用 .env 文件
+npm run start:streamablehttp
+
+# 方式2：使用命令行参数
+cos-mcp --Region=xxx --Bucket=xxx --SecretId=xxx --SecretKey=xxx
+```
+
+### 测试验证
+
+✅ 已测试场景：
+- 客户端 Headers 配置生效
+- 服务端默认配置降级
+- 配置优先级正确
+- 多并发请求隔离
+- 所有工具函数支持动态配置

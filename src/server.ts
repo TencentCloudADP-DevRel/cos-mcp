@@ -4,7 +4,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import COS from 'cos-nodejs-sdk-v5';
 import { z } from 'zod';
-import { ServerConfig } from './index.js';
+import { ServerConfig, CosConfig } from './index.js';
 import { CosService } from './services/cos/cos.service.js';
 import { CIPicService } from './services/ci/pic.service.js';
 import { CIMediaService } from './services/ci/media.service.js';
@@ -12,10 +12,70 @@ import { CIAIService } from './services/ci/ai.service.js';
 import { CIMateInsightService } from './services/ci/mateInsight.service.js';
 import { CIDocService } from './services/ci/doc.service.js';
 
+/**
+ * 扩展的请求上下文，包含 COS 配置
+ */
+interface ExtendedRequestContext {
+  cosConfig?: Partial<CosConfig>;
+}
+
 export function maskSecret(secret: string): string {
   secret = String(secret);
   if (secret.length <= 4) return '****';
   return `${secret.substring(0, 4)}****${secret.slice(-4)}`;
+}
+
+/**
+ * 从 HTTP Headers 中提取 COS 配置
+ * 支持的 headers:
+ * - cos-secret-id: SecretId
+ * - cos-secret-key: SecretKey
+ * - cos-region: Region
+ * - cos-bucket: Bucket
+ * - cos-dataset-name: DatasetName (可选)
+ */
+export function extractCosConfigFromHeaders(headers: any): Partial<CosConfig> | null {
+  const config: Partial<CosConfig> = {};
+  
+  if (headers['cos-secret-id']) {
+    config.SecretId = headers['cos-secret-id'];
+  }
+  if (headers['cos-secret-key']) {
+    config.SecretKey = headers['cos-secret-key'];
+  }
+  if (headers['cos-region']) {
+    config.Region = headers['cos-region'];
+  }
+  if (headers['cos-bucket']) {
+    config.Bucket = headers['cos-bucket'];
+  }
+  if (headers['cos-dataset-name']) {
+    config.DatasetName = headers['cos-dataset-name'];
+  }
+  
+  // 如果有任何 COS 配置项，返回配置对象
+  if (Object.keys(config).length > 0) {
+    return config;
+  }
+  
+  return null;
+}
+
+/**
+ * 合并默认配置和 Headers 配置
+ */
+export function mergeCosConfig(defaultConfig: CosConfig, headerConfig: Partial<CosConfig> | null): CosConfig {
+  if (!headerConfig) {
+    return defaultConfig;
+  }
+  
+  return {
+    Region: headerConfig.Region || defaultConfig.Region,
+    SecretId: headerConfig.SecretId || defaultConfig.SecretId,
+    SecretKey: headerConfig.SecretKey || defaultConfig.SecretKey,
+    Bucket: headerConfig.Bucket || defaultConfig.Bucket,
+    DatasetName: headerConfig.DatasetName || defaultConfig.DatasetName,
+  };
 }
 
 export const Logger = {
@@ -28,28 +88,40 @@ export const Logger = {
 };
 
 const USER_AGENT = 'modelcontextprotocol/servers/cos';
-export function createCosMcpServer(config: ServerConfig) {
+
+/**
+ * 创建 COS 服务实例（根据动态配置）
+ */
+export function createCosInstances(cosConfig: CosConfig) {
   const cos = new COS({
-    SecretId: config.cosConfig?.SecretId || '',
-    SecretKey: config.cosConfig?.SecretKey || '',
+    SecretId: cosConfig.SecretId || '',
+    SecretKey: cosConfig.SecretKey || '',
     UserAgent: USER_AGENT,
   });
 
-  const bucket = config.cosConfig.Bucket;
-  const region = config.cosConfig.Region;
-  const datasetName = config.cosConfig.DatasetName;
+  const bucket = cosConfig.Bucket;
+  const region = cosConfig.Region;
+  const datasetName = cosConfig.DatasetName;
 
-  const COSInstance = new CosService(bucket, region, cos);
-  const CIPicInstance = new CIPicService(bucket, region, cos);
-  const CIMediaInstance = new CIMediaService(bucket, region, cos);
-  const CIAIInstance = new CIAIService(bucket, region, cos);
-  const CIMateInsightInstance = new CIMateInsightService(
-    bucket,
-    region,
-    datasetName || '',
+  return {
     cos,
-  );
-  const CIDocInstance = new CIDocService(bucket, region, cos);
+    COSInstance: new CosService(bucket, region, cos),
+    CIPicInstance: new CIPicService(bucket, region, cos),
+    CIMediaInstance: new CIMediaService(bucket, region, cos),
+    CIAIInstance: new CIAIService(bucket, region, cos),
+    CIMateInsightInstance: new CIMateInsightService(
+      bucket,
+      region,
+      datasetName || '',
+      cos,
+    ),
+    CIDocInstance: new CIDocService(bucket, region, cos),
+  };
+}
+
+export function createCosMcpServer(config: ServerConfig) {
+  // 创建默认的 COS 实例（从 .env 或命令行参数）
+  const defaultInstances = createCosInstances(config.cosConfig);
 
   const server = new McpServer(
     {
@@ -66,17 +138,41 @@ export function createCosMcpServer(config: ServerConfig) {
     },
   );
 
-  server.tool('getCosConfig', '获取COS配置, 腾讯云配置', {}, async () => {
-    if (config.cosConfig) {
-      config.cosConfig.SecretId = maskSecret(config.cosConfig.SecretId);
-      config.cosConfig.SecretKey = maskSecret(config.cosConfig.SecretKey);
+  /**
+   * 获取当前请求的 COS 实例
+   * 优先使用 request context 中的配置，否则使用默认配置
+   */
+  const getCosInstances = (requestContext?: ExtendedRequestContext) => {
+    // 如果有请求上下文且包含自定义配置，创建新实例
+    if (requestContext?.cosConfig) {
+      const mergedConfig = mergeCosConfig(config.cosConfig, requestContext.cosConfig);
+      return createCosInstances(mergedConfig);
     }
+    // 否则使用默认实例
+    return defaultInstances;
+  };
+
+  server.tool('getCosConfig', '获取COS配置, 腾讯云配置', {}, async (params, extra) => {
+    const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+    const instances = getCosInstances(requestContext);
+    const currentConfig = requestContext?.cosConfig 
+      ? mergeCosConfig(config.cosConfig, requestContext.cosConfig)
+      : config.cosConfig;
+    
+    const maskedConfig = {
+      ...config,
+      cosConfig: {
+        ...currentConfig,
+        SecretId: maskSecret(currentConfig.SecretId),
+        SecretKey: maskSecret(currentConfig.SecretKey),
+      }
+    };
 
     return {
       content: [
         {
           type: 'text',
-          text: JSON.stringify(config, null, 2),
+          text: JSON.stringify(maskedConfig, null, 2),
         },
       ],
     };
@@ -93,7 +189,9 @@ export function createCosMcpServer(config: ServerConfig) {
         .optional()
         .describe('目标目录 （存在存储桶的哪个目录）'),
     },
-    async ({ fileName, filePath, targetDir }) => {
+    async ({ fileName, filePath, targetDir }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { COSInstance } = getCosInstances(requestContext);
       const res = await COSInstance.uploadFile({
         fileName,
         filePath,
@@ -127,7 +225,9 @@ export function createCosMcpServer(config: ServerConfig) {
         .optional()
         .describe('内容类型，如 text/plain, application/json 等，默认为 text/plain'),
     },
-    async ({ content, fileName, targetDir, contentType }) => {
+    async ({ content, fileName, targetDir, contentType }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { COSInstance } = getCosInstances(requestContext);
       const res = await COSInstance.uploadString({
         content,
         fileName,
@@ -161,7 +261,9 @@ export function createCosMcpServer(config: ServerConfig) {
         .optional()
         .describe('内容类型，如 image/png (图片), application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document (文档) 等，如果base64带头部则默认自带的头部否则默认为 application/octet-stream'),
     },
-    async ({ base64Content, fileName, targetDir, contentType }) => {
+    async ({ base64Content, fileName, targetDir, contentType }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { COSInstance } = getCosInstances(requestContext);
       const res = await COSInstance.uploadBase64({
         base64Content,
         fileName,
@@ -199,7 +301,9 @@ export function createCosMcpServer(config: ServerConfig) {
         .optional()
         .describe('字符串编码格式，默认为utf8。hex=十六进制，base64=Base64编码，utf8=UTF-8文本，ascii=ASCII文本，binary=二进制'),
     },
-    async ({ content, fileName, targetDir, contentType, encoding }) => {
+    async ({ content, fileName, targetDir, contentType, encoding }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { COSInstance } = getCosInstances(requestContext);
       const res = await COSInstance.uploadBuffer({
         content,
         fileName,
@@ -230,7 +334,9 @@ export function createCosMcpServer(config: ServerConfig) {
         .optional()
         .describe('目标目录 （存在存储桶的哪个目录）'),
     },
-    async ({ sourceUrl, fileName, targetDir}) => {
+    async ({ sourceUrl, fileName, targetDir}, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { COSInstance } = getCosInstances(requestContext);
       const res = await COSInstance.uploadFileSourceUrl({
         targetDir,
         fileName,
@@ -255,7 +361,9 @@ export function createCosMcpServer(config: ServerConfig) {
     {
       objectKey: z.string().describe('文件的路径'),
     },
-    async ({ objectKey = '/' }) => {
+    async ({ objectKey = '/' }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { COSInstance } = getCosInstances(requestContext);
       const res = await COSInstance.getObjectUrl(objectKey);
         return {
           content: [
@@ -276,7 +384,9 @@ export function createCosMcpServer(config: ServerConfig) {
     {
       objectKey: z.string().describe('文件的路径'),
     },
-    async ({ objectKey = '/' }) => {
+    async ({ objectKey = '/' }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { COSInstance } = getCosInstances(requestContext);
       const res = await COSInstance.getObject(objectKey);
       if (!res.isSuccess) {
         return {
@@ -301,7 +411,9 @@ export function createCosMcpServer(config: ServerConfig) {
     {
       Prefix: z.string().optional().describe('文件列表的路径前缀,默认根路径'),
     },
-    async ({ Prefix = '' }) => {
+    async ({ Prefix = '' }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { COSInstance } = getCosInstances(requestContext);
       const res = await COSInstance.getBucket(Prefix);
       return {
         content: [
@@ -323,7 +435,9 @@ export function createCosMcpServer(config: ServerConfig) {
     {
       objectKey: z.string().describe('图片在存储桶里的路径'),
     },
-    async ({ objectKey }) => {
+    async ({ objectKey }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { CIPicInstance } = getCosInstances(requestContext);
       const res = await CIPicInstance.imageInfo(objectKey);
       return {
         content: [
@@ -343,7 +457,9 @@ export function createCosMcpServer(config: ServerConfig) {
     {
       objectKey: z.string().describe('图片在存储桶里的路径'),
     },
-    async ({ objectKey }) => {
+    async ({ objectKey }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { CIAIInstance } = getCosInstances(requestContext);
       const res = await CIAIInstance.assessQuality(objectKey);
       return {
         content: [
@@ -363,7 +479,9 @@ export function createCosMcpServer(config: ServerConfig) {
     {
       objectKey: z.string().describe('图片在存储桶里的路径'),
     },
-    async ({ objectKey }) => {
+    async ({ objectKey }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { CIAIInstance } = getCosInstances(requestContext);
       const res = await CIAIInstance.aiSuperResolution(objectKey);
       return {
         content: [
@@ -385,7 +503,9 @@ export function createCosMcpServer(config: ServerConfig) {
       width: z.string().optional().describe('宽度'),
       height: z.string().optional().describe('高度'),
     },
-    async ({ objectKey, width = '5', height = '5' }) => {
+    async ({ objectKey, width = '5', height = '5' }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { CIAIInstance } = getCosInstances(requestContext);
       const res = await CIAIInstance.aiPicMatting(objectKey, width, height);
       return {
         content: [
@@ -407,7 +527,9 @@ export function createCosMcpServer(config: ServerConfig) {
         .string()
         .describe('COS对象键（完整路径）示例: images/qrcode.jpg'),
     },
-    async ({ objectKey }) => {
+    async ({ objectKey }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { CIAIInstance } = getCosInstances(requestContext);
       const res = await CIAIInstance.aiQrcode(objectKey);
       return {
         content: [
@@ -430,7 +552,9 @@ export function createCosMcpServer(config: ServerConfig) {
         .describe('COS对象键（完整路径）示例: images/photo.jpg'),
       text: z.string().describe('水印文字内容（支持中文）').default('test'),
     },
-    async ({ objectKey, text }) => {
+    async ({ objectKey, text }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { CIPicInstance } = getCosInstances(requestContext);
       const res = await CIPicInstance.waterMarkFont({ objectKey, text });
       return {
         content: [
@@ -452,7 +576,9 @@ export function createCosMcpServer(config: ServerConfig) {
     {
       objectKey: z.string().describe('对象在存储桶里的路径'),
     },
-    async ({ objectKey }) => {
+    async ({ objectKey }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { CIMediaInstance } = getCosInstances(requestContext);
       const res = await CIMediaInstance.createMediaSmartCoverJob(objectKey);
       return {
         content: [
@@ -473,7 +599,9 @@ export function createCosMcpServer(config: ServerConfig) {
         .string()
         .describe('要查询的任务ID，可通过提交智能封面任务的响应中获取。'),
     },
-    async ({ jobId }) => {
+    async ({ jobId }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { CIMediaInstance } = getCosInstances(requestContext);
       const res = await CIMediaInstance.describeMediaJob(jobId);
       return {
         content: [
@@ -495,7 +623,9 @@ export function createCosMcpServer(config: ServerConfig) {
     {
       uri: z.string().describe('图片地址'),
     },
-    async ({ uri }) => {
+    async ({ uri }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { CIMateInsightInstance } = getCosInstances(requestContext);
       const res = await CIMateInsightInstance.imageSearchPic({ uri });
       return {
         content: [
@@ -515,7 +645,9 @@ export function createCosMcpServer(config: ServerConfig) {
     {
       text: z.string().describe('检索的文本'),
     },
-    async ({ text }) => {
+    async ({ text }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { CIMateInsightInstance } = getCosInstances(requestContext);
       const res = await CIMateInsightInstance.imageSearchText({ text });
       return {
         content: [
@@ -536,7 +668,9 @@ export function createCosMcpServer(config: ServerConfig) {
     {
       objectKey: z.string().describe('对象在存储桶里的路径'),
     },
-    async ({ objectKey }) => {
+    async ({ objectKey }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { CIDocInstance } = getCosInstances(requestContext);
       const res = await CIDocInstance.createDocToPdfJobs(objectKey);
       return {
         content: [
@@ -557,7 +691,9 @@ export function createCosMcpServer(config: ServerConfig) {
         .string()
         .describe('要查询的任务ID，可通过提交文档任务的响应中获取。'),
     },
-    async ({ jobId }) => {
+    async ({ jobId }, extra) => {
+      const requestContext = (extra as any)?.requestContext as ExtendedRequestContext | undefined;
+      const { CIDocInstance } = getCosInstances(requestContext);
       const res = await CIDocInstance.describeDocProcessJob(jobId);
       return {
         content: [
@@ -585,9 +721,18 @@ export function startWithSSE(server: McpServer, port: number = 3001) {
   // sessionId to transport
   const transports: { [sessionId: string]: SSEServerTransport } = {};
 
-  app.get('/sse', async (_: Request, res: Response) => {
+  app.get('/sse', async (req: Request, res: Response) => {
+    // 从 headers 中提取 COS 配置
+    const cosConfig = extractCosConfigFromHeaders(req.headers);
+    
     const transport = new SSEServerTransport('/messages', res);
     transports[transport.sessionId] = transport;
+    
+    // 将配置注入到请求上下文（如果存在）
+    if (cosConfig) {
+      (transport as any).requestContext = { cosConfig };
+    }
+    
     res.on('close', () => {
       delete transports[transport.sessionId];
     });
@@ -600,6 +745,12 @@ export function startWithSSE(server: McpServer, port: number = 3001) {
     const sessionId = req.query.sessionId as string;
     const transport = transports[sessionId];
     if (transport) {
+      // 从 headers 中提取 COS 配置并注入
+      const cosConfig = extractCosConfigFromHeaders(req.headers);
+      if (cosConfig && !(transport as any).requestContext) {
+        (transport as any).requestContext = { cosConfig };
+      }
+      
       // 传递已解析的 body（parsedBody 参数）
       await transport.handlePostMessage(req, res, req.body);
     } else {
@@ -614,6 +765,12 @@ export function startWithSSE(server: McpServer, port: number = 3001) {
     Logger.log(`SSE模式监听端口: ${port}`);
     Logger.log(`SSE: http://localhost:${port}/sse`);
     Logger.log(`消息: http://localhost:${port}/messages`);
+    Logger.log(`支持通过 HTTP Headers 传递 COS 配置:`);
+    Logger.log(`  - cos-secret-id`);
+    Logger.log(`  - cos-secret-key`);
+    Logger.log(`  - cos-region`);
+    Logger.log(`  - cos-bucket`);
+    Logger.log(`  - cos-dataset-name (可选)`);
   });
 }
 
@@ -627,10 +784,18 @@ export function startWithStreamableHTTP(server: McpServer, port: number = 3001) 
   // StreamableHTTP 使用单一路径处理所有请求
   // 支持 GET（SSE流）和 POST（请求）
   const handleMcp = async (req: Request, res: Response) => {
+    // 从 headers 中提取 COS 配置
+    const cosConfig = extractCosConfigFromHeaders(req.headers);
+    
     // 为每个请求创建新的 transport 实例（无状态模式）
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // 无状态模式
     });
+    
+    // 将配置注入到 transport 的请求上下文（如果存在）
+    if (cosConfig) {
+      (transport as any).requestContext = { cosConfig };
+    }
     
     // 连接服务器
     await server.connect(transport);
@@ -659,5 +824,11 @@ export function startWithStreamableHTTP(server: McpServer, port: number = 3001) 
 
     Logger.log(`StreamableHTTP 模式监听端口: ${port}`);
     Logger.log(`MCP 端点: http://localhost:${port}/mcp`);
+    Logger.log(`支持通过 HTTP Headers 传递 COS 配置:`);
+    Logger.log(`  - cos-secret-id`);
+    Logger.log(`  - cos-secret-key`);
+    Logger.log(`  - cos-region`);
+    Logger.log(`  - cos-bucket`);
+    Logger.log(`  - cos-dataset-name (可选)`);
   });
 }
