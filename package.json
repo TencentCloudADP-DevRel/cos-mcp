@@ -13,6 +13,7 @@
     "watch": "tsc --watch",
     "start": "npm run build && node ./dist/index.js",
     "start:sse": "npm run build && node ./dist/index.js --connectType=sse",
+    "start:http": "npm run build && node ./dist/index.js --connectType=streamablehttp",
     "inspect": "npx @modelcontextprotocol/inspector",
     "publish:release": "npm run build && npm publish --access public",
     "publish:local": "npm run build && npm pack",

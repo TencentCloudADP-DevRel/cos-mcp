@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamablehttp.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import COS from 'cos-nodejs-sdk-v5';
 import { z } from 'zod';
@@ -575,6 +576,11 @@ export function createCosMcpServer(config: ServerConfig) {
 
 export function startWithSSE(server: McpServer, port: number = 3001) {
   const app = express();
+  
+  // 增加请求体大小限制 - 支持大文件上传 (最大 100MB)
+  app.use(express.json({ limit: '100mb' }));
+  app.use(express.urlencoded({ limit: '100mb', extended: true }));
+  
   // to support multiple simultaneous connections we have a lookup object from
   // sessionId to transport
   const transports: { [sessionId: string]: SSEServerTransport } = {};
@@ -588,11 +594,14 @@ export function startWithSSE(server: McpServer, port: number = 3001) {
     await server.connect(transport);
   });
 
+  // 关键修复：将已解析的 body 作为第三个参数传递给 handlePostMessage
+  // 这样 SSEServerTransport 就不会尝试再次读取 stream
   app.post('/messages', async (req: Request, res: Response) => {
     const sessionId = req.query.sessionId as string;
     const transport = transports[sessionId];
     if (transport) {
-      await transport.handlePostMessage(req, res);
+      // 传递已解析的 body（parsedBody 参数）
+      await transport.handlePostMessage(req, res, req.body);
     } else {
       res.status(400).send('No transport found for sessionId');
     }
@@ -605,5 +614,50 @@ export function startWithSSE(server: McpServer, port: number = 3001) {
     Logger.log(`SSE模式监听端口: ${port}`);
     Logger.log(`SSE: http://localhost:${port}/sse`);
     Logger.log(`消息: http://localhost:${port}/messages`);
+  });
+}
+
+export function startWithStreamableHTTP(server: McpServer, port: number = 3001) {
+  const app = express();
+  
+  // 增加请求体大小限制 - 支持大文件上传 (最大 100MB)
+  app.use(express.json({ limit: '100mb' }));
+  app.use(express.urlencoded({ limit: '100mb', extended: true }));
+
+  // StreamableHTTP 使用单一路径处理所有请求
+  // 支持 GET（SSE流）和 POST（请求）
+  const handleMcp = async (req: Request, res: Response) => {
+    // 为每个请求创建新的 transport 实例（无状态模式）
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined, // 无状态模式
+    });
+    
+    // 连接服务器
+    await server.connect(transport);
+    
+    try {
+      // 传递已解析的 body（对于 POST 请求）
+      await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+      Logger.error('处理 StreamableHTTP 请求时出错:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ 
+          error: error instanceof Error ? error.message : 'Unknown error' 
+        });
+      }
+    }
+  };
+
+  // 同时支持 GET 和 POST
+  app.get('/mcp', handleMcp);
+  app.post('/mcp', handleMcp);
+  app.delete('/mcp', handleMcp);
+
+  app.listen(port, () => {
+    Logger.log = console.log;
+    Logger.error = console.error;
+
+    Logger.log(`StreamableHTTP 模式监听端口: ${port}`);
+    Logger.log(`MCP 端点: http://localhost:${port}/mcp`);
   });
 }

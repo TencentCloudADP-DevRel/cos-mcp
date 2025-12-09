@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { createCosMcpServer, startWithSSE } from './server.js';
+import { createCosMcpServer, startWithSSE, startWithStreamableHTTP } from './server.js';
 import { config } from 'dotenv';
 import { resolve } from 'path';
 import yargs from 'yargs';
@@ -41,7 +41,7 @@ function getConfig() {
       connectType: {
         type: 'string',
         description: '连接类型',
-        choices: ['stdio', 'sse'],
+        choices: ['stdio', 'sse', 'streamablehttp'],
       },
     })
     .help()
@@ -126,6 +126,12 @@ async function startCOServer() {
     // 使用stdio:标准输入输出进行通信
     const transport = new StdioServerTransport();
     await server.connect(transport);
+    return;
+  }
+
+  if (config.connectType === 'streamablehttp') {
+    // 使用 StreamableHTTP 进行通信（推荐）
+    startWithStreamableHTTP(server, config.port || 3001);
     return;
   }
 

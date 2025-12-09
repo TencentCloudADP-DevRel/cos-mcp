@@ -125,15 +125,18 @@ export class CosService {
       // 构建COS路径
       const cosPath = this.buildCosPath(actualFileName, targetDir);
 
-      // 上传文件
-      const cosParams: COS.UploadFileParams = {
+      // 读取文件内容
+      const fileContent = fs.readFileSync(filePath);
+
+      // 上传文件 - 使用 putObject 而不是 uploadFile
+      const cosParams: COS.PutObjectParams = {
         Bucket: this.bucket,
         Region: this.region,
         Key: cosPath,
-        FilePath: filePath,
+        Body: fileContent,
       };
 
-      const result = await this.cos.uploadFile(cosParams);
+      const result = await this.cos.putObject(cosParams);
 
       return {
         isSuccess: true,
